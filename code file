@@ -1,0 +1,534 @@
+APPENDIX A: MAIN WINDOW
+#include "mainwindow.h"
+
+#include <QPrintPreviewDialog>
+#include <QToolBar>
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent)
+{
+    setupUi(this);
+    createToolBarActions();
+    createActions();
+    onItemsActionTriggered();
+    setWindowTitle(tr("RFID-Shopping Cart"));
+    setWindowIcon(QIcon("://images/price-tag.png"));
+}
+
+MainWindow::~MainWindow()
+{
+}
+
+void MainWindow::onCartActionTriggered()
+{
+    cartWidget = new CartWidget;
+    cartWidget->setWindowModality(Qt::ApplicationModal);
+    cartWidget->show();
+    connect(cartWidget, &CartWidget::itemsQuantityChanged, itemsAction, &QAction::trigger);
+}
+
+void MainWindow::onItemsActionTriggered()
+{
+    itemswidget = new ItemsWidget(this);
+    setCentralWidget(itemswidget);
+}
+
+void MainWindow::createToolBarActions()
+{
+
+    leftToolBar = new QToolBar(this);
+    itemsAction = new QAction(QIcon("://images/trolley.png"), tr("Items"));
+    itemsAction->setToolTip(tr("List of all items"));
+    cartAction = new QAction(QIcon("://images/shopping-cart.png"), tr("Cart"));
+    cartAction->setToolTip(tr("Cart Items"));
+    categoryAction = new QAction(QIcon("://images/diagram.png"), tr("Category"));
+    categoryAction->setToolTip(tr("Items Categories"));
+
+    leftToolBar->addAction(itemsAction);
+//    leftToolBar->addAction(categoryAction);
+    leftToolBar->addAction(cartAction);
+    leftToolBar->setIconSize(QSize(60, 40));
+    leftToolBar->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+    leftToolBar->setMovable(false);
+    leftToolBar->setPalette( QPalette( Qt::darkMagenta ) );
+    leftToolBar->setContextMenuPolicy(Qt::PreventContextMenu);
+
+    leftToolBar->setStyleSheet("QToolButton {background-color:darkMagenta;} QToolButton{color: white}");
+
+    addToolBar(Qt::LeftToolBarArea, leftToolBar);
+}
+
+void MainWindow::createActions()
+{
+    connect(actionExit, &QAction::triggered, QApplication::quit);
+    connect(itemsAction, &QAction::triggered, this, &MainWindow::onItemsActionTriggered);
+    connect(cartAction, &QAction::triggered, this, &MainWindow::onCartActionTriggered);
+//    connect(cartWidget, SIGNAL(itemsQuantityChanged()), itemsAction, SLOT(trigger()));
+}
+
+
+ 
+APPENDIX B: ITEMS WIDGET
+#include "itemswidget.h"
+#include <QCompleter>
+#include <QDebug>
+#include <QKeyEvent>
+#include <QMessageBox>
+#include <QScrollBar>
+#include <QSortFilterProxyModel>
+#include <QSqlDatabase>
+#include <QSqlQuery>
+
+ItemsWidget::ItemsWidget(QWidget *parent) :
+    QWidget(parent)
+{
+    setupUi(this);
+    table_model_setup();
+    tableview_connections();
+}
+
+void ItemsWidget::table_model_setup()
+{
+    tableModel = new QSqlTableModel(this);
+//    tableModel->setQuery("SELECT * FROM `items` WHERE 1 ORDER BY name ASC, created ASC");
+    tableModel->setTable("items");
+    tableModel->setHeaderData(0, Qt::Horizontal, tr("ID"));
+    tableModel->setHeaderData(1, Qt::Horizontal, tr("Name"));
+    tableModel->setHeaderData(2, Qt::Horizontal, tr("Qty"));
+    tableModel->setHeaderData(3, Qt::Horizontal, tr("Qty Sold"));
+    tableModel->setHeaderData(4, Qt::Horizontal, tr("Price (#)"));
+    tableModel->setHeaderData(5, Qt::Horizontal, tr("Description"));
+    tableModel->setHeaderData(6, Qt::Horizontal, tr("Created"));
+    tableModel->setSort(6, Qt::AscendingOrder);
+    tableModel->setSort(1, Qt::AscendingOrder);
+    tableModel->select();
+//    tableModel->setEditStrategy(QSqlTableModel::OnFieldChange);
+
+    tableView->setModel(tableModel);
+    tableView->horizontalHeader()->setMinimumHeight(30);
+    tableView->hideColumn(0);
+//    tableView->horizontalHeader()->setStretchLastSection(true);
+    tableView->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    tableView->horizontalHeader()->setSortIndicatorShown(true);
+    tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    tableView->setSelectionBehavior(QAbstractItemView::SelectRows);
+    tableView->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    tableView->setAlternatingRowColors(true);
+    tableView->setSortingEnabled(true);
+
+    completer = new QCompleter(searchLineEdit);
+    completer->setModel(tableModel);
+    completer->setCompletionColumn(1);
+    searchLineEdit->setCompleter(completer);
+}
+
+/**
+ * @brief ItemsWidget::on_addButton_clicked
+ * @return void
+ * @note Initializes ittem add form dialog
+ */
+void ItemsWidget::on_addButton_clicked()
+{
+    addDialog = new QDialog;
+    addForm.setupUi(addDialog);
+
+    for(auto i=0; i<100; i++) {
+        addForm.qtyComboBox->insertItem(0, QString::number(i+1));
+    }
+
+    connect(addForm.nameLineEdit, &QLineEdit::textChanged, this, &ItemsWidget::enableAddFormSaveButton);
+    connect(addForm.priceLineEdit, &QLineEdit::textChanged, this, &ItemsWidget::enableAddFormSaveButton);
+    connect(addForm.qtyComboBox, static_cast<void (QComboBox::*)(const QString &)>(&QComboBox::currentIndexChanged),
+        [this](){
+        addForm.textEdit->clear();
+        addForm.textEdit->insertHtml("<strong>Qty: "+addForm.qtyComboBox->currentText()+"<br />"
+                                     "Card Req.: "+addForm.qtyComboBox->currentText()+"<br /><br /></strong>");
+
+        addForm.addTagButton->setEnabled(true);
+        if(tagList.count() > 0) {
+            addForm.addTagButton->setChecked(false);
+        }
+        tagList.clear();
+    });
+    connect(addForm.tagLineEdit, &QLineEdit::returnPressed, this, &ItemsWidget::onAddTagButtonTriggered);
+    connect(addForm.saveButton, &QPushButton::clicked, this, &ItemsWidget::addFormSaveButtonClicked);
+
+    addDialog->exec();
+}
+
+/**
+ * @brief ItemsWidget::onAddTagButtonTriggered
+ * initalizes the item addTagButton of the add form
+ */
+void ItemsWidget::onAddTagButtonTriggered() {
+    QString tag(addForm.tagLineEdit->text());
+    addForm.tagLineEdit->clear();
+    QSqlQuery sql("SELECT * FROM item_rfid WHERE tag = " + tag);
+    if(sql.exec()) {
+        if(sql.numRowsAffected()) {
+            addForm.textEdit->insertHtml("<font font=3 color=red>Scan card {"+ tag +"} is inuse</font><br />");
+        } else if(tagList.contains(tag)) {
+            addForm.textEdit->insertHtml("<font font=3 color=red>Scan card {"+ tag +"} duplicate entry!!!</font><br />");
+        }
+        else {
+            tagList.insert(tagList.count(), tag);
+            addForm.textEdit->insertHtml("<font font=3 color=green>Scan card {"+ tag +"} is valid</font><br />");
+        }
+    }
+    enableAddFormSaveButton();
+    if(tagList.count() >= addForm.qtyComboBox->currentText().toInt()) {
+        addForm.frame->setEnabled(true);
+        addForm.tagLineEdit->setDisabled(true);
+        addForm.addTagButton->setEnabled(false);
+    }
+
+    QScrollBar *sb = addForm.textEdit->verticalScrollBar();
+    sb->setValue(sb->maximum());
+}
+
+/**
+ * @brief ItemsWidget::tableview_connections
+ * @note Make tableview connections for signals
+ * and slots
+ */
+void ItemsWidget::tableview_connections()
+{
+    connect(tableView, &QTableView::clicked, [=]() {deleteButton->setEnabled(true);});
+    connect(deleteButton, &QPushButton::clicked, [this] () {
+        int r = QMessageBox::warning(this, tr("Confirmation"), tr("Are you sure you want to delete the selected item(s)"),
+                                     QMessageBox::Ok, QMessageBox::Close|QMessageBox::Default);
+        if(r == QMessageBox::Ok){
+            QItemSelectionModel *selectionModel = tableView ->selectionModel();
+            QModelIndexList modelList = selectionModel->selectedRows();
+            for(int i=0; i<modelList.size(); i++) {
+                tableModel->removeRow(modelList.at(i).row());
+            }
+            tableModel->submitAll();
+            tableModel->select();
+            deleteButton->setEnabled(false);
+        }
+    });
+}
+
+/**
+ * @brief ItemsWidget::enableAddFormSaveButton
+ * Hanldes if save button is to enable
+ */
+void ItemsWidget::enableAddFormSaveButton (){
+    addForm.saveButton->setEnabled(!addForm.nameLineEdit->text().isEmpty()
+                                   && !addForm.priceLineEdit->text().isEmpty()
+                                   && tagList.count() == addForm.qtyComboBox->currentText().toInt());
+}
+
+/**
+ * @brief ItemsWidget::addFormSaveButtonClicked
+ * @note This method implements when save button on
+ * add form is clicked
+ */
+void ItemsWidget::addFormSaveButtonClicked()
+{
+    QSqlQuery item_sql;
+    item_sql.prepare("INSERT INTO items (name, qty, price, descr) VALUES (?, ?, ?, ?)");
+    item_sql.addBindValue(addForm.nameLineEdit->text());
+    item_sql.addBindValue(addForm.qtyComboBox->currentText().toInt());
+    item_sql.addBindValue(addForm.priceLineEdit->text().toDouble());
+    item_sql.addBindValue(addForm.descrLineEdit->text());
+
+    QSqlDatabase::database().transaction();
+    if(item_sql.exec()) {
+        int item_id = item_sql.lastInsertId().toInt();
+        QSqlQuery sql;
+        sql.prepare("INSERT INTO item_rfid (item_id, tag) VALUES (?, ?)");
+        foreach (QString tag, tagList) {
+            sql.addBindValue(item_id);
+            sql.addBindValue(tag);
+            sql.exec();
+        }
+
+        QSqlDatabase::database().commit();
+        QMessageBox::information(this, tr("Success"), tr("New Item has been added!"));
+        addDialog->close();
+        tableModel->select();
+    }
+}
+
+/**
+ * @brief ItemsWidget::on_searchToolButton_clicked
+ */
+void ItemsWidget::on_searchToolButton_clicked()
+{
+    tableView->clearSelection();
+    tableView->setSelectionMode(QAbstractItemView::MultiSelection);
+    QSortFilterProxyModel proxy;
+    proxy.setSourceModel(tableModel);
+    proxy.setFilterKeyColumn(1);
+    proxy.setFilterFixedString(searchLineEdit->text());
+    proxy.setFilterCaseSensitivity(Qt::CaseInsensitive);
+
+    qDebug() << "search rows found: " << proxy.rowCount(); //number of match found
+
+    if(!proxy.rowCount()) {
+        QMessageBox::information(this,tr("Search:"), tr("No match found!"));
+        return;
+    }
+
+    for(auto i=0; i<proxy.rowCount(); i++) {
+        QModelIndex matchingIndex = proxy.mapToSource(proxy.index(i, 0));
+        if(matchingIndex.isValid()){
+            tableView->scrollTo(matchingIndex);
+            tableView->selectRow(matchingIndex.row());
+//            emit searchFound(tableModel, matchingIndex);
+        }
+    }
+
+    tableView->setSelectionMode(QAbstractItemView::SingleSelection);
+}
+
+
+ 
+APPENDIX C: CART WIDGET
+#include "cartwidget.h"
+#include <QKeyEvent>
+#include <QDebug>
+#include <QSqlQuery>
+#include <QSqlError>
+#include <QMessageBox>
+#include <QPrintPreviewDialog>
+#include <QPainter>
+#include <QPaintEngine>
+#include <QTextDocument>
+#include <QTextTableFormat>
+#include <QTextTable>
+#include <QFileDialog>
+#include <QStandardPaths>
+
+CartWidget::CartWidget(QWidget *parent) :
+    QWidget(parent)
+{
+    setupUi(this);
+
+//    layout()->setSizeConstraint(QLayout::SetFixedSize);
+   constructTable();
+    setFocusPolicy(Qt::StrongFocus);
+}
+
+void CartWidget::constructTable()
+{
+    tableWidget->horizontalHeader()->setStretchLastSection(true);
+//    tableWidget->setSortingEnabled(true);
+//    tableWidget->horizontalHeader()->setSortIndicatorShown(true);
+    tableWidget->verticalHeader()->hide();
+//    tableWidget->verticalHeader()->hideSection();
+    tableWidget->setEditTriggers(QTableWidget::NoEditTriggers);
+    tableWidget->setSelectionMode(QTableWidget::NoSelection);
+    tableWidget->setRowCount(0);
+
+    checkoutButton->setEnabled(false);
+    receiptButton->setEnabled(false);
+}
+
+void CartWidget::on_receiptButton_clicked()
+{
+    printReceipt();
+}
+
+void CartWidget::on_checkoutButton_clicked()
+{
+    int r = QMessageBox ::information(this, tr("Confirmation!!!"),
+                                      tr("Are you sure you are checking out?"),
+                                      QMessageBox::Close|QMessageBox::Default,
+                                      QMessageBox::Ok);
+    if(r != QMessageBox::Ok) return;
+    addItemButton->setDisabled(true);
+
+    if(!printReceipt()) return;
+
+//    QSqlDatabase::database().transaction();
+    QSqlQuery query;
+    foreach (QString tag, tagList) {
+        query.prepare("UPDATE items SET qty = `qty`-1, sold = `sold`+1 WHERE id = (SELECT item_id FROM item_rfid WHERE tag = ? ) ");
+        query.addBindValue(tag);
+        if(query.exec()) {
+            QSqlQuery ir;
+            ir.prepare("DELETE FROM item_rfid WHERE tag = ?");
+            ir.addBindValue(tag);
+            ir.exec();
+            qDebug() << ir.executedQuery();
+        }
+        qDebug() << query.executedQuery();
+    }
+
+    emit itemsQuantityChanged();
+    on_clearButton_clicked();
+}
+
+void CartWidget::recalculate_cart()
+{
+    QString tagIds = tagList.join(',');
+    QString sql("SELECT *, "
+                "COUNT(item_rfid.item_id) purchase_unit, "
+                "(COUNT(item_rfid.item_id)*items.price) selection "
+                "FROM `items` "
+                "INNER JOIN item_rfid ON items.id = item_rfid.item_id "
+                "WHERE item_rfid.tag IN ("+ tagIds +" ) GROUP BY item_rfid.item_id");
+
+    query = QSqlQuery(sql);
+    if(query.exec()) {
+        prepareTable(query);
+    } else {
+        qDebug() << "Error: " << query.lastError().text();
+    }
+}
+
+void CartWidget::prepareTable(QSqlQuery &q)
+{
+//    tableWidget->setRowCount(q.numRowsAffected());
+    tableWidget->setRowCount(0);
+    float grand_total = 0;
+    QLocale naira;
+    while (q.next()) {
+        int rowCount = tableWidget->rowCount();
+        tableWidget->insertRow(rowCount);
+        QTableWidgetItem *itemName = new QTableWidgetItem(q.value("name").toString());
+    //         cubesHeaderItem->setIcon(QIcon(QPixmap(":/Images/cubed.png")));
+        itemName->setData(Qt::ToolTipRole, q.value("id").toString());
+        itemName->setTextAlignment(Qt::AlignLeft);
+        tableWidget->setItem(rowCount, 0, itemName);
+
+        QTableWidgetItem *unitPrice = new QTableWidgetItem(naira.toCurrencyString(q.value("price").toFloat(), " ", 2));
+        unitPrice->setTextAlignment(Qt::AlignRight);
+        tableWidget->setItem(rowCount, 1, unitPrice);
+
+        QTableWidgetItem *qty = new QTableWidgetItem(QString::number(q.value("purchase_unit").toInt()));
+        qty->setTextAlignment(Qt::AlignHCenter);
+        tableWidget->setItem(rowCount, 2, qty);
+
+        QTableWidgetItem *total = new QTableWidgetItem(naira.toCurrencyString(q.value("selection").toFloat(), " ", 2));
+        total->setTextAlignment(Qt::AlignRight);
+        tableWidget->setItem(rowCount, 3, total);
+
+        grand_total += q.value("selection").toFloat();
+    }
+
+    if(tableWidget->rowCount() > 0) {
+        tableWidget->insertRow(tableWidget->rowCount());
+        int rowCount = tableWidget->rowCount();
+        tableWidget->insertRow(rowCount);
+
+        QTableWidgetItem *grand = new QTableWidgetItem(naira.toCurrencyString(grand_total, "NGN", 2));
+        grand->setTextAlignment(Qt::AlignRight);
+        grand->setTextColor(Qt::green);
+        grand->setFont(QFont("Arial San serif", 18, 4));
+        tableWidget->setItem(rowCount, 3, grand);
+        checkoutButton->setEnabled(true);
+        receiptButton->setEnabled(true);
+    }
+}
+
+void CartWidget::on_addItemButton_toggled(bool checked)
+{
+    Q_UNUSED(checked);
+    setFocus();
+}
+
+bool CartWidget::event(QEvent *event)
+{
+    if (event->type() == QEvent::KeyPress) {
+        QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
+        if(addItemButton->isChecked()) {
+            if(keyEvent->key() >= 48 && keyEvent->key() <=57) {
+                tag.append(QChar(keyEvent->key()));
+            }
+//            qDebug("Key: %i", keyEvent->key());
+            if(keyEvent->key() == Qt::Key_Return) {
+                if(!tag.isEmpty()) {
+//                    qDebug() << "tag id: " << tag;
+                    if(!tagList.contains(tag))
+                        tagList.append(tag);
+
+                    tag.clear();
+                    recalculate_cart();
+                }
+            }
+        } else{
+
+            if(keyEvent->key() == Qt::Key_Return) {
+                setFocus();
+                setFocusPolicy(Qt::StrongFocus);
+                return true;
+            }
+        }
+    }
+
+    return QWidget::event(event);
+}
+
+void CartWidget::on_clearButton_clicked()
+{
+    tagList.clear();
+    constructTable();
+}
+
+bool CartWidget::printReceipt()
+{
+
+    if(tableWidget->rowCount() == 0) return false;
+
+    QString filename =  QFileDialog::getSaveFileName(this,
+                                                     tr("Save cart receipt"),
+                                                     QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/Receipt.pdf",
+                                                     tr("(*.pdf)"));
+
+    if(filename.isEmpty()) return false;
+    if(!filename.contains(".pdf"))
+        filename.append(".pdf");
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const int columns = tableWidget->columnCount();
+    const int rows = tableWidget->rowCount();
+    QTextDocument doc;
+    QTextCursor cursor(&doc);
+    QTextTableFormat tableFormat;
+    tableFormat.setHeaderRowCount(1);
+    tableFormat.setAlignment(Qt::AlignHCenter|Qt::AlignJustify);
+    tableFormat.setCellPadding(20);
+    tableFormat.setCellSpacing(0);
+    tableFormat.setBorder(1);
+    tableFormat.setMargin(0);
+    tableFormat.setBorderBrush(QBrush(Qt::SolidPattern));
+    tableFormat.clearColumnWidthConstraints();
+    cursor.insertHtml("<h3 align=center>RFID SHOPPING APPLICATION AUTOMATED RECEIPT.</h3><br />");
+    QTextTable *textTable = cursor.insertTable(rows + 1, columns, tableFormat);
+    QTextCharFormat tableHeaderFormat;
+    tableHeaderFormat.setBackground(QColor("#DADADA"));
+    for (int i = 0; i < columns; i++) {
+        QTextTableCell cell = textTable->cellAt(0, i);
+        cell.setFormat(tableHeaderFormat);
+        QTextCursor cellCursor = cell.firstCursorPosition();
+        cellCursor.insertText(tableWidget->horizontalHeaderItem(i)->data(Qt::DisplayRole).toString());
+    }
+    for (int i = 0; i < rows; i++) {
+        for (int j = 0; j < columns; j++) {
+            QTableWidgetItem *item = tableWidget->item(i, j);
+            if (!item || item->text().isEmpty()) {
+                tableWidget->setItem(i, j, new QTableWidgetItem(""));
+            }
+
+            QTextTableCell cell = textTable->cellAt(i + 1, j);
+            QTextCursor cellCursor = cell.firstCursorPosition();
+            cellCursor.insertText(tableWidget->item(i, j)->text());
+        }
+    }
+    cursor.movePosition(QTextCursor::End);
+    QPrinter printer(QPrinter::PrinterResolution);
+    printer.setOutputFormat(QPrinter::PdfFormat);
+    printer.setPaperSize(QPrinter::A4);
+    printer.setOrientation(QPrinter::Landscape);
+    printer.setOutputFileName(filename);
+    doc.setDocumentMargin(0);
+    doc.setTextWidth(5);
+    doc.print(&printer);
+    QApplication::restoreOverrideCursor();
+
+    return true;
+}
